@@ -10,6 +10,10 @@ VAULT_MCP_PORT = int(os.environ.get("VAULT_MCP_PORT", "8420"))
 VAULT_OAUTH_CLIENT_ID = os.environ.get("VAULT_OAUTH_CLIENT_ID", "vault-mcp-client")
 VAULT_OAUTH_CLIENT_SECRET = os.environ.get("VAULT_OAUTH_CLIENT_SECRET", "")
 
+# Cloudflare Tunnel public hostname (e.g. vault-mcp.yourdomain.com)
+# Set this to allow the MCP library DNS rebinding protection to accept tunnel requests.
+# Leave empty for local-only use.
+VAULT_MCP_HOSTNAME = os.environ.get("VAULT_MCP_HOSTNAME", "")
 # Safety limits
 MAX_CONTENT_SIZE = 1_000_000  # 1MB max write size
 MAX_BATCH_SIZE = 20           # Max files per batch operation
