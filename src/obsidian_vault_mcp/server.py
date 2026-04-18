@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .config import VAULT_MCP_PORT, VAULT_MCP_TOKEN, VAULT_PATH
+from .config import VAULT_MCP_PORT, VAULT_MCP_TOKEN, VAULT_PATH, VAULT_MCP_HOSTNAME
 from .frontmatter_index import FrontmatterIndex
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,13 @@ async def lifespan(server):
     logger.info("Vault MCP server shut down.")
 
 
+# Build allowed_hosts dynamically so VAULT_MCP_HOSTNAME env var is sufficient;
+# no code edit needed when the tunnel hostname changes.
+_allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+if VAULT_MCP_HOSTNAME:
+    _allowed_hosts.append(VAULT_MCP_HOSTNAME)
+    logger.info(f"Tunnel hostname added to allowed_hosts: {VAULT_MCP_HOSTNAME}")
+
 # Create the MCP server
 mcp = FastMCP(
     "obsidian_web_mcp",
@@ -40,16 +47,9 @@ mcp = FastMCP(
     lifespan=lifespan,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "127.0.0.1:*",
-            "localhost:*",
-            "[::1]:*",
-            # Add your tunnel hostname here, e.g.:
-            # "vault-mcp.example.com",
-        ],
+        allowed_hosts=_allowed_hosts,
     ),
 )
-
 
 # --- Register all tools ---
 
