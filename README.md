@@ -134,16 +134,7 @@ export VAULT_MCP_HOSTNAME="vault-mcp.yourdomain.com"
 
 The script authenticates with Cloudflare, creates a tunnel, writes the config, and sets up the DNS record. You will need a domain managed by Cloudflare.
 
-After setup, add your tunnel hostname to the `allowed_hosts` list in `server.py` so the MCP library's DNS rebinding protection accepts requests from your domain:
-
-```python
-allowed_hosts=[
-    "127.0.0.1:*",
-    "localhost:*",
-    "[::1]:*",
-    "vault-mcp.yourdomain.com",  # add your hostname here
-],
-```
+Set `VAULT_MCP_HOSTNAME` to your tunnel hostname (e.g. `vault-mcp.yourdomain.com`) so the MCP library's DNS rebinding protection accepts requests from your domain. The server appends it to `allowed_hosts` automatically at startup. Leave unset for local-only use.
 
 ## Production Deployment (macOS)
 
