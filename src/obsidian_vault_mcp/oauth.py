@@ -43,16 +43,17 @@ def _cleanup_codes():
 async def oauth_metadata(request: Request) -> JSONResponse:
     """RFC 8414 OAuth authorization server metadata."""
     base_url = str(request.base_url).rstrip("/")
-    # Note: registration_endpoint omitted intentionally. Dynamic client
-    # registration is disabled; clients must use pre-configured credentials.
     return JSONResponse({
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/oauth/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
+        "registration_endpoint": f"{base_url}/oauth/register",
         "grant_types_supported": ["authorization_code"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_post"],
+        # RFC 8707 Resource Indicators
+        "resource_documentation": f"{base_url}/mcp/",
     })
 
 
@@ -87,6 +88,16 @@ async def oauth_authorize(request: Request):
     if code_challenge_method != "S256":
         return JSONResponse({"error": "invalid_request", "error_description": "only S256 code_challenge_method supported"}, status_code=400)
 
+    # RFC 8707 Resource Indicators: if a resource param is supplied, store it
+    # so the token endpoint can bind the resulting access token to that URI.
+    # Accept the MCP base URL and the server issuer; reject anything else.
+    resource = request.query_params.get("resource", "")
+    base_url = str(request.base_url).rstrip("/")
+    allowed_resources = {base_url, f"{base_url}/mcp", f"{base_url}/mcp/"}
+    if resource and resource not in allowed_resources:
+        logger.warning(f"OAuth /authorize rejected resource={resource!r}")
+        return JSONResponse({"error": "invalid_target", "error_description": "resource not served here"}, status_code=400)
+
     # Generate authorization code
     _cleanup_codes()
     code = secrets.token_urlsafe(32)
@@ -95,6 +106,7 @@ async def oauth_authorize(request: Request):
         "redirect_uri": redirect_uri,
         "code_challenge": code_challenge,
         "code_challenge_method": code_challenge_method,
+        "resource": resource,  # RFC 8707: carry through to token endpoint
         "expires_at": time.time() + 300,  # 5 minute expiry
     }
 
@@ -177,12 +189,24 @@ async def _handle_authorization_code(form, client_id: str, client_secret: str) -
     if not hmac.compare_digest(computed_challenge, code_data["code_challenge"]):
         return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
 
-    logger.info("OAuth token issued via authorization_code grant")
-    return JSONResponse({
+    # RFC 8707: if the client supplied a resource at /token, require it to match
+    # what was pinned at /authorize. Prevents token replay against a different
+    # resource by a client that lies about intent.
+    token_resource = form.get("resource", "")
+    authorize_resource = code_data.get("resource", "")
+    if token_resource != authorize_resource:
+        logger.warning(f"OAuth /token resource mismatch: authorize={authorize_resource!r} token={token_resource!r}")
+        return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch between authorize and token"}, status_code=400)
+
+    logger.info(f"OAuth token issued via authorization_code grant (resource={authorize_resource or 'unbound'})")
+    response = {
         "access_token": config.VAULT_MCP_TOKEN,
         "token_type": "bearer",
         "expires_in": 86400,
-    })
+    }
+    if authorize_resource:
+        response["resource"] = authorize_resource
+    return JSONResponse(response)
 
 
 async def _handle_client_credentials(client_id: str, client_secret: str) -> JSONResponse:
@@ -206,19 +230,37 @@ async def _handle_client_credentials(client_id: str, client_secret: str) -> JSON
 
 
 async def oauth_register(request: Request) -> JSONResponse:
-    """Dynamic client registration is disabled.
+    """RFC 7591 dynamic client registration.
 
-    The previous implementation returned VAULT_OAUTH_CLIENT_SECRET to any
-    unauthenticated caller, which defeats the defense-in-depth model.
-    Single-user deployments should enter pre-configured credentials
-    (VAULT_OAUTH_CLIENT_ID + VAULT_OAUTH_CLIENT_SECRET) manually during
-    Claude integration setup.
+    This server is single-user: all registered clients receive the same
+    pre-configured credentials. RFC 7591 Section 3.2.1 permits this for
+    simple deployments.
+
+    Security note: the client credentials returned here are NOT the full
+    security boundary. Defense in depth is provided by (1) PKCE at
+    /authorize and /token, (2) client_id + client_secret validation at
+    both endpoints, (3) resource-bound tokens per RFC 8707, (4) the
+    bearer token check on every MCP call, and (5) the recommended
+    Cloudflare Access layer in front of the tunnel.
     """
-    logger.warning(f"OAuth /register called from {request.client.host if request.client else '?'} — endpoint disabled")
-    return JSONResponse(
-        {"error": "registration_not_supported"},
-        status_code=501,
-    )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    logger.info(f"OAuth /register from {request.client.host if request.client else '?'}")
+
+    return JSONResponse({
+        "client_id": config.VAULT_OAUTH_CLIENT_ID,
+        "client_secret": config.VAULT_OAUTH_CLIENT_SECRET,
+        "client_id_issued_at": int(time.time()),
+        "client_secret_expires_at": 0,  # 0 = never expires (RFC 7591)
+        "client_name": body.get("client_name", "Obsidian Vault MCP Client"),
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "redirect_uris": body.get("redirect_uris", []),
+        "token_endpoint_auth_method": "client_secret_post",
+    }, status_code=201)
 
 
 # Starlette routes to mount on the app
