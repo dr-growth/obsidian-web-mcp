@@ -43,11 +43,12 @@ def _cleanup_codes():
 async def oauth_metadata(request: Request) -> JSONResponse:
     """RFC 8414 OAuth authorization server metadata."""
     base_url = str(request.base_url).rstrip("/")
+    # Note: registration_endpoint omitted intentionally. Dynamic client
+    # registration is disabled; clients must use pre-configured credentials.
     return JSONResponse({
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/oauth/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
-        "registration_endpoint": f"{base_url}/oauth/register",
         "grant_types_supported": ["authorization_code"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
@@ -74,6 +75,17 @@ async def oauth_authorize(request: Request):
 
     if not redirect_uri:
         return JSONResponse({"error": "invalid_request", "error_description": "redirect_uri required"}, status_code=400)
+
+    # Reject unknown client_id. Only the pre-configured client may initiate a flow.
+    if not hmac.compare_digest(client_id, config.VAULT_OAUTH_CLIENT_ID):
+        logger.warning(f"OAuth /authorize rejected unknown client_id={client_id!r}")
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+
+    # PKCE is mandatory for all authorize requests.
+    if not code_challenge:
+        return JSONResponse({"error": "invalid_request", "error_description": "code_challenge required"}, status_code=400)
+    if code_challenge_method != "S256":
+        return JSONResponse({"error": "invalid_request", "error_description": "only S256 code_challenge_method supported"}, status_code=400)
 
     # Generate authorization code
     _cleanup_codes()
@@ -129,6 +141,18 @@ async def _handle_authorization_code(form, client_id: str, client_secret: str) -
     redirect_uri = form.get("redirect_uri", "")
     code_verifier = form.get("code_verifier", "")
 
+    # Verify client credentials (constant-time). Required by RFC 6749 for
+    # confidential clients. Without this, any caller with an auth code could
+    # redeem it for a token.
+    if not config.VAULT_OAUTH_CLIENT_SECRET:
+        return JSONResponse({"error": "server_error"}, status_code=500)
+
+    id_match = hmac.compare_digest(client_id, config.VAULT_OAUTH_CLIENT_ID)
+    secret_match = hmac.compare_digest(client_secret, config.VAULT_OAUTH_CLIENT_SECRET)
+    if not (id_match and secret_match):
+        logger.warning(f"OAuth /token authorization_code rejected client auth (client_id={client_id!r})")
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+
     _cleanup_codes()
 
     if code not in _auth_codes:
@@ -140,18 +164,18 @@ async def _handle_authorization_code(form, client_id: str, client_secret: str) -
     if redirect_uri and code_data["redirect_uri"] and redirect_uri != code_data["redirect_uri"]:
         return JSONResponse({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}, status_code=400)
 
-    # Verify PKCE code_challenge if one was provided during authorization
-    if code_data["code_challenge"]:
-        if not code_verifier:
-            return JSONResponse({"error": "invalid_grant", "error_description": "code_verifier required"}, status_code=400)
+    # PKCE is mandatory — /authorize rejects requests without code_challenge,
+    # so code_data["code_challenge"] will always be set here.
+    if not code_verifier:
+        return JSONResponse({"error": "invalid_grant", "error_description": "code_verifier required"}, status_code=400)
 
-        # S256: BASE64URL(SHA256(code_verifier)) must match code_challenge
-        import base64
-        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-        computed_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    # S256: BASE64URL(SHA256(code_verifier)) must match code_challenge
+    import base64
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    computed_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
-        if not hmac.compare_digest(computed_challenge, code_data["code_challenge"]):
-            return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
+    if not hmac.compare_digest(computed_challenge, code_data["code_challenge"]):
+        return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
 
     logger.info("OAuth token issued via authorization_code grant")
     return JSONResponse({
@@ -182,28 +206,19 @@ async def _handle_client_credentials(client_id: str, client_secret: str) -> JSON
 
 
 async def oauth_register(request: Request) -> JSONResponse:
-    """Dynamic client registration endpoint.
+    """Dynamic client registration is disabled.
 
-    Claude calls this during initial setup to register as an OAuth client.
-    Returns pre-configured credentials.
+    The previous implementation returned VAULT_OAUTH_CLIENT_SECRET to any
+    unauthenticated caller, which defeats the defense-in-depth model.
+    Single-user deployments should enter pre-configured credentials
+    (VAULT_OAUTH_CLIENT_ID + VAULT_OAUTH_CLIENT_SECRET) manually during
+    Claude integration setup.
     """
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    # Generate a unique client_id for this registration
-    client_id = f"vault-mcp-{secrets.token_hex(8)}"
-
-    return JSONResponse({
-        "client_id": client_id,
-        "client_secret": config.VAULT_OAUTH_CLIENT_SECRET,
-        "client_name": body.get("client_name", "Obsidian Vault MCP Client"),
-        "grant_types": ["authorization_code"],
-        "response_types": ["code"],
-        "redirect_uris": body.get("redirect_uris", []),
-        "token_endpoint_auth_method": "client_secret_post",
-    }, status_code=201)
+    logger.warning(f"OAuth /register called from {request.client.host if request.client else '?'} — endpoint disabled")
+    return JSONResponse(
+        {"error": "registration_not_supported"},
+        status_code=501,
+    )
 
 
 # Starlette routes to mount on the app
