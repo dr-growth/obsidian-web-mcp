@@ -202,33 +202,31 @@ def main():
     if not VAULT_MCP_TOKEN:
         logger.warning("VAULT_MCP_TOKEN is not set -- auth will reject all requests")
 
-    # Build the Starlette app with auth middleware and OAuth endpoints
-    try:
-        from .auth import BearerAuthMiddleware
-        from .oauth import oauth_routes
+    # Build the Starlette app with auth middleware and OAuth endpoints.
+    # Refuse to start if auth can't be wired up — never fall back to an
+    # unauthenticated server, since this is exposed to the public internet
+    # via Cloudflare Tunnel.
+    from .auth import BearerAuthMiddleware
+    from .oauth import oauth_routes
 
-        app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app()
 
-        # Mount OAuth routes (these are excluded from bearer auth via the middleware)
-        for route in oauth_routes:
-            app.routes.insert(0, route)
+    # Mount OAuth routes (these are excluded from bearer auth via the middleware)
+    for route in oauth_routes:
+        app.routes.insert(0, route)
 
-        app.add_middleware(BearerAuthMiddleware)
-        logger.info(f"Starting server on port {VAULT_MCP_PORT} with bearer auth + OAuth")
+    app.add_middleware(BearerAuthMiddleware)
+    logger.info(f"Starting server on port {VAULT_MCP_PORT} with bearer auth + OAuth")
 
-        import uvicorn
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=VAULT_MCP_PORT,
-            log_level="info",
-            proxy_headers=True,
-            forwarded_allow_ips="*",
-        )
-    except Exception as e:
-        logger.warning(f"Could not build app ({e}), falling back to mcp.run()")
-        logger.warning("Auth will NOT be enforced in this mode")
-        mcp.run(transport="streamable-http", port=VAULT_MCP_PORT)
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=VAULT_MCP_PORT,
+        log_level="info",
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
 
 
 if __name__ == "__main__":
